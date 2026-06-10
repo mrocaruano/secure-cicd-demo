@@ -1,0 +1,12 @@
+# Files that must never be sent to the Docker build context. Keeping the
+# context small makes builds faster, and keeping git history and CI config
+# out of the image removes information an attacker could use.
+.git
+.github
+.venv
+tests
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+README.md

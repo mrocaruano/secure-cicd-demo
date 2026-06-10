@@ -1,0 +1,36 @@
+# Tool configuration for pytest and ruff. Keeping it in one standard file
+# means CI and any laptop run the tools with identical settings.
+
+[tool.pytest.ini_options]
+# Only look for tests under tests/.
+testpaths = ["tests"]
+# Put the repository root on sys.path so "from app.main import app" works
+# the same no matter how pytest is invoked (bare "pytest" on a CI runner or
+# "python -m pytest" on a laptop resolve imports differently otherwise).
+pythonpath = ["."]
+
+[tool.ruff]
+# The Python version the code targets; ruff uses it to pick valid syntax
+# and suggest modern idioms.
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+# Rule families to enforce:
+#   E, F: pycodestyle and pyflakes, the classic correctness and style rules
+#   I:    import ordering
+#   B:    bugbear, common sources of subtle bugs
+#   UP:   pyupgrade, prefer modern syntax
+#   S:    security rules ported from the bandit scanner (hardcoded
+#         passwords, eval, weak crypto, and similar)
+select = ["E", "F", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# S101 forbids assert statements, but assert is the whole point of pytest,
+# so that one rule is switched off for the test files only.
+"tests/*" = ["S101"]
+
+[tool.ruff.lint.isort]
+# Tell the import sorter that "app" is our own package so it groups its
+# imports after third party ones.
+known-first-party = ["app"]

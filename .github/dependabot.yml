@@ -1,0 +1,37 @@
+# =============================================================================
+# Dependabot configuration: automated dependency updates.
+#
+# A pipeline is only as secure as its most outdated dependency, and this
+# repository has three different kinds:
+#
+#   1. Python packages (fastapi, uvicorn, the dev tools)
+#   2. The GitHub Actions the workflows run, pinned by commit SHA
+#   3. The Docker base image, pinned by digest in the Dockerfile
+#
+# People usually remember the first one and forget the other two, even though
+# compromised actions and stale base images are both real attack vectors.
+# Dependabot watches all three and opens a pull request when an update
+# exists. Every such pull request runs through the same six CI gates as a
+# human change, so an update that breaks tests or scanning cannot merge.
+# =============================================================================
+version: 2
+updates:
+  # Watch requirements.txt and requirements-dev.txt for new package versions.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Watch the workflow files and propose updated commit SHA pins when the
+  # actions publish new releases.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Watch the FROM lines in the Dockerfile and propose new image digests
+  # when the base image is rebuilt (for example with OS security patches).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

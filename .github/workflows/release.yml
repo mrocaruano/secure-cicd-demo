@@ -1,0 +1,152 @@
+# =============================================================================
+# Release workflow: build, gate, publish, and sign the container image.
+#
+# Runs on every push to main (which in practice means every merged pull
+# request, because branch protection blocks direct pushes). The steps run in
+# one job in a strict order, and that order is itself the security control:
+#
+#   build the image locally
+#     -> scan it with Trivy (HIGH or CRITICAL findings stop the job here)
+#       -> log in and push to the GitHub Container Registry
+#         -> generate a software bill of materials (SBOM)
+#           -> sign the published image with cosign
+#
+# Because the scan sits between build and push, an image with a known
+# serious vulnerability can never reach the registry.
+#
+# Credentials: the only one used anywhere is the workflow's own short-lived
+# GITHUB_TOKEN. There are no stored registry passwords and no signing keys.
+# Signing uses GitHub's OIDC identity tokens, described at the cosign step.
+# =============================================================================
+name: Release
+
+on:
+  push:
+    branches: [main]
+  # Allow starting this workflow by hand from the Actions tab, useful for
+  # re-publishing without an artificial commit.
+  workflow_dispatch:
+
+# Deny by default, same reasoning as ci.yml. The single job below opts in
+# to exactly what it needs.
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a release that is part way through publishing. A canceled
+  # half-publish could leave the registry in a confusing state.
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, scan, push, SBOM, sign
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # read the source to build it
+      packages: write # push the finished image to ghcr.io
+      id-token: write # mint the OIDC token that cosign exchanges for a signing certificate
+    steps:
+      # Download the repository contents onto the runner.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      # Set up Docker Buildx, the builder backend used by the build steps.
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      # Compute the image names, tags, and OCI labels in one place. Output:
+      #   ghcr.io/<owner>/<repo>:latest          (moving tag, default branch only)
+      #   ghcr.io/<owner>/<repo>:sha-<full sha>  (immutable tag per commit)
+      # Labels embed the source repo, commit, and build time into the image
+      # metadata so an image can always be traced back to its exact source.
+      - name: Compute image tags and labels
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Build the image and load it into the runner's local Docker engine.
+      # "load: true" means the image stays on the runner. Nothing has been
+      # published at this point.
+      - name: Build image (local only, nothing is published yet)
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # The gate. Trivy scans the image that was just built: the OS packages
+      # inside the base image and the installed Python packages. If it finds
+      # any HIGH or CRITICAL vulnerability that has a fix available, it exits
+      # nonzero, this job stops, and the push below never happens.
+      - name: Scan image with Trivy (gate, fail on HIGH or CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          format: table
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          # Only fail on vulnerabilities that a rebuild or version bump could
+          # actually fix. Failing on unfixable CVEs would teach everyone to
+          # ignore a permanently red gate.
+          ignore-unfixed: true
+
+      # Authenticate to the GitHub Container Registry using the workflow's
+      # own short-lived token. No stored secret is involved.
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish. This rebuild is instant because every layer is already in
+      # the build cache from the first build; the step only uploads. Its
+      # "digest" output (the immutable sha256 identity of the pushed image)
+      # is what gets signed two steps down.
+      - name: Push image (cached build, this only uploads)
+        id: push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # Generate a software bill of materials: a machine-readable inventory
+      # of every package inside the image, in the standard SPDX format. It is
+      # attached to this workflow run as a downloadable artifact. When the
+      # next big vulnerability is announced, this file answers "do we ship
+      # the affected package?" without rebuilding or rescanning anything.
+      - name: Generate SBOM (Syft, SPDX JSON, uploaded as a run artifact)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          format: spdx-json
+          artifact-name: sbom.spdx.json
+
+      # Install the cosign signing tool.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Sign the pushed image digest. "Keyless" signing works like this:
+      # GitHub gives the job a short-lived OIDC identity token (allowed by
+      # the id-token permission above). Cosign exchanges it with the public
+      # Sigstore certificate authority for a certificate that names THIS
+      # repository, THIS workflow file, and THIS branch as the signer. The
+      # signature is stored in the registry next to the image and logged in
+      # a public transparency log. Anyone can later verify that the image
+      # came from this exact pipeline, and there is no private key anywhere
+      # that could be stolen.
+      - name: Sign image (keyless, bound to this workflow's OIDC identity)
+        env:
+          # Values are passed through environment variables instead of being
+          # templated straight into the script, which is the pattern that
+          # avoids shell injection through expression expansion.
+          IMAGE: ghcr.io/${{ github.repository }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"

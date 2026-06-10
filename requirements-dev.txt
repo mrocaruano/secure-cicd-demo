@@ -1,0 +1,8 @@
+# Development and CI tooling. Kept separate from requirements.txt so none
+# of it ends up inside the container image.
+# The line below pulls in the runtime dependencies as well, so one install
+# command prepares a full dev environment.
+-r requirements.txt
+pytest==9.0.3
+httpx==0.28.1
+ruff==0.15.16

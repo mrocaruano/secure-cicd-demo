@@ -1,0 +1,200 @@
+# =============================================================================
+# CI workflow: the quality and security gates for every change.
+#
+# This workflow runs on every pull request that targets main, and again on
+# every push to main itself. It contains six independent jobs that run in
+# parallel. Branch protection on main requires all six to pass, so a pull
+# request cannot merge while any gate is red.
+#
+# Hardening decisions that apply to the whole file:
+#
+#   1. Every action is pinned to a full commit SHA instead of a version tag.
+#      A tag like "v6" can be repointed at different, possibly malicious,
+#      code after the fact. A commit SHA cannot change. The version number in
+#      the trailing comment is only for human readers and for Dependabot,
+#      which keeps these pins updated automatically.
+#
+#   2. "permissions: {}" at the workflow level strips every permission from
+#      the GITHUB_TOKEN by default. Each job then grants itself only what it
+#      needs, which here is read access to the repository contents. If a step
+#      were ever compromised, the token it could steal would be useless for
+#      pushing code, packages, or releases.
+#
+#   3. Every checkout sets "persist-credentials: false" so the git token is
+#      not written into the workspace on disk, where a later step could
+#      read it.
+# =============================================================================
+name: CI
+
+# Run on direct pushes to main and on every pull request that targets main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Deny by default: the GITHUB_TOKEN starts with no permissions at all.
+permissions: {}
+
+# If new commits arrive while an older run for the same branch is still
+# going, cancel the older run. This saves runner minutes and keeps the
+# checks list pointed at the newest commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Gate 1: Lint. Ruff checks code style, common bug patterns, import order,
+  # and a set of security rules ported from the bandit scanner (hardcoded
+  # passwords, use of eval, weak hash functions, and similar). Configuration
+  # lives in pyproject.toml.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # this job only needs to read the source code
+    steps:
+      # Download the repository contents onto the runner.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      # Install the Python version the project targets.
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      # Install the app dependencies plus dev tools. Ruff is pinned in
+      # requirements-dev.txt so CI and laptops run the same version.
+      - run: python -m pip install -r requirements-dev.txt
+
+      # Check for rule violations. Any finding makes ruff exit nonzero,
+      # which fails this job and blocks the merge.
+      - run: ruff check .
+
+      # Verify formatting without rewriting anything. "--check" only reports.
+      - run: ruff format --check .
+
+  # ---------------------------------------------------------------------------
+  # Gate 2: Tests. Plain pytest. If the application does not behave as the
+  # tests describe, nothing merges. Test configuration is in pyproject.toml.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test (pytest)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -r requirements-dev.txt
+      # Run the whole test suite verbosely. A single failing test fails the job.
+      - run: pytest -v
+
+  # ---------------------------------------------------------------------------
+  # Gate 3: Static analysis (SAST). Semgrep scans the source code for insecure
+  # patterns: injection risks, dangerous APIs, bad crypto, and so on. The
+  # "p/default" ruleset is Semgrep's curated baseline for general use.
+  # ---------------------------------------------------------------------------
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      # Semgrep is installed at a pinned version rather than via a third
+      # party action, which keeps the supply chain for this job small.
+      - run: python -m pip install semgrep==1.165.0
+      # "--error" turns findings into a nonzero exit code so they block the
+      # merge instead of just printing a report.
+      - name: Semgrep scan (findings fail the job)
+        run: semgrep scan --config p/default --error
+
+  # ---------------------------------------------------------------------------
+  # Gate 4: Secret scanning. Gitleaks looks for hardcoded credentials such as
+  # API tokens, private keys, and passwords. It scans the entire git history,
+  # not just the new diff, because a secret that was committed and later
+  # deleted is still exposed to anyone who clones the repository.
+  # ---------------------------------------------------------------------------
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # fetch-depth 0 means clone the full history instead of only the
+          # latest commit, so gitleaks can scan every commit ever made.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          # The action uses this token to read pull request metadata.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Posting PR comments would require a token with write access.
+          # The job summary shows the same findings, so comments stay off
+          # and the token stays read only.
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+  # ---------------------------------------------------------------------------
+  # Gate 5: Dependency audit (software composition analysis). pip-audit
+  # resolves the full dependency tree from the requirements files and checks
+  # every package version against known vulnerability databases (the Python
+  # Packaging Advisory Database and the Open Source Vulnerability database).
+  # ---------------------------------------------------------------------------
+  deps:
+    name: Dependency audit (pip-audit)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - run: python -m pip install pip-audit==2.10.0
+      # Audit both runtime and dev dependencies. Any known CVE in the
+      # resolved set fails the job.
+      - run: pip-audit -r requirements.txt -r requirements-dev.txt
+
+  # ---------------------------------------------------------------------------
+  # Gate 6: Workflow audit. The pipeline itself is an attack surface, so
+  # zizmor (a static analyzer for GitHub Actions) audits these workflow files
+  # for problems like script injection through template expansion, unpinned
+  # actions, overly broad token permissions, and credentials left on disk.
+  # ---------------------------------------------------------------------------
+  workflows:
+    name: Workflow audit (zizmor)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - run: python -m pip install zizmor==1.25.2
+      # Audit every workflow in the repository. Findings of severity "low"
+      # or higher fail the job. The token enables zizmor's online checks,
+      # such as verifying that pinned SHAs really belong to the tagged repo.
+      - name: Audit workflow files (the pipeline is an attack surface too)
+        run: zizmor --min-severity low .github/workflows/
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

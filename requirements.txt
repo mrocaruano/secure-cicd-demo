@@ -1,0 +1,5 @@
+# Runtime dependencies only: exactly what the container image needs to
+# serve requests. Versions are pinned exactly so builds are reproducible
+# and a pip-audit verdict applies to what actually ships.
+fastapi==0.136.3
+uvicorn==0.49.0
