@@ -25,3 +25,9 @@ def test_health_reports_ok():
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_root_includes_build_info():
+    # Expects a build_id field that the application does not return yet.
+    response = client.get("/")
+    assert "build_id" in response.json()
