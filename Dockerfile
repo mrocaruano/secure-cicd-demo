@@ -15,7 +15,7 @@
 # =============================================================================
 
 # ---- Stage 1: builder. Installs dependencies into an isolated prefix. ----
-FROM python:3.13-slim@sha256:4d96149461c3d03a5c8b2774494768e25142904fa1a6c210310675454b38b40f AS builder
+FROM python:3.14-slim@sha256:d7a925f9eb9639a93e455b9f12c167569358818c0f62b51b88edbc8fcf34c421 AS builder
 
 # All work in this stage happens in /build.
 WORKDIR /build
@@ -31,7 +31,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # ---- Stage 2: the final runtime image. Starts clean from the same base. ----
-FROM python:3.13-slim@sha256:4d96149461c3d03a5c8b2774494768e25142904fa1a6c210310675454b38b40f
+FROM python:3.14-slim@sha256:d7a925f9eb9639a93e455b9f12c167569358818c0f62b51b88edbc8fcf34c421
 
 # Create a dedicated unprivileged account to run the service. If the app is
 # ever compromised through a request, the attacker lands in a process that
