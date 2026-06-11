@@ -120,8 +120,8 @@ The reasoning behind the less obvious choices:
 
 ### Proof the gates actually block
 
-A [demo pull request](https://github.com/mrocaruano/secure-cicd-demo/pulls) is left open on
-purpose. It introduces a fake hardcoded credential, a failing test, and a known-vulnerable pinned
+[Pull request #1](https://github.com/mrocaruano/secure-cicd-demo/pull/1) is left open on purpose.
+It introduces a fake hardcoded credential, a failing test, and a known-vulnerable pinned
 dependency. The corresponding three checks fail while the unrelated gates stay green, and branch
 protection disables the merge button.
 
